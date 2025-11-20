@@ -7,12 +7,11 @@ from geopy.distance import geodesic
 
 # 페이지 기본 설정
 st.set_page_config(
-    page_title="응급실 실시간 대시보드",
+    page_title="실시간 응급실 혼잡도 대시보드",
     layout="wide"
 )
 
-# 🔑 Streamlit Cloud의 Secrets에서 API 키 가져오기
-# Settings → Secrets 에서 EGEN_API_KEY 를 설정해 두어야 합니다.
+# 🔑 Streamlit Cloud Secrets 에서 API 키 가져오기
 API_KEY = st.secrets.get("EGEN_API_KEY", None)
 BASE_URL = "http://apis.data.go.kr/B552657/ErmctInfoInqireService/getEmrrmRltmUsefulSckbdInfoInqire"
 
@@ -21,24 +20,48 @@ if not API_KEY:
     st.stop()
 
 
-@st.cache_data(ttl=240)  # 4분 캐시
-def fetch_data(num_rows: int = 999) -> pd.DataFrame:
-    """공공데이터포털에서 실시간 응급실 정보 가져와서 DataFrame으로 반환"""
+def fetch_data(num_rows: int = 999):
+    """
+    공공데이터포털 응급의료 실시간 정보 API 호출하여 DataFrame과 에러메시지를 반환
+    성공 시: (df, None)
+    실패 시: (None, 에러메시지 문자열)
+    """
+    # serviceKey 는 URL에 직접 붙이고, 나머지는 params 로 넘깁니다.
+    url = f"{BASE_URL}?serviceKey={API_KEY}"
     params = {
-        "serviceKey": API_KEY,
         "_type": "json",
         "pageNo": 1,
         "numOfRows": num_rows,
     }
 
-    r = requests.get(BASE_URL, params=params, timeout=15)
-    r.raise_for_status()
-    js = r.json()
+    # 1) HTTP 요청 시도
+    try:
+        r = requests.get(url, params=params, timeout=15)
+    except Exception as e:
+        return None, f"API 요청 자체가 실패했습니다: {e}"
 
-    items = js.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-    df = pd.DataFrame(items)
+    # 2) 상태코드 확인
+    if r.status_code != 200:
+        snippet = r.text[:300]
+        return None, f"API 호출 실패 (HTTP {r.status_code})\n응답 내용 일부:\n{snippet}"
 
-    # 필요한 컬럼만 정리
+    # 3) JSON 파싱
+    try:
+        js = r.json()
+    except ValueError:
+        snippet = r.text[:300]
+        return None, f"API 응답이 JSON 형식이 아닙니다.\n응답 내용 일부:\n{snippet}"
+
+    body = js.get("response", {}).get("body", {})
+    items = body.get("items", {})
+    item_list = items.get("item")
+
+    if not item_list:
+        return None, "API 응답은 성공했지만 'item' 데이터가 비어 있습니다."
+
+    df = pd.DataFrame(item_list)
+
+    # --------- 여기서부터 데이터 전처리 ---------
     cols = [
         "dutyName",     # 병원명
         "dutyAddr",     # 주소
@@ -60,7 +83,7 @@ def fetch_data(num_rows: int = 999) -> pd.DataFrame:
     for c in ["hvec", "hvoc", "wgs84Lat", "wgs84Lon"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # 혼잡도 지수 = 재원환자수 / (가용병상 + 1)
+    # 혼잡도 지수 = 재원 환자수 / (가용병상 + 1)
     df["혼잡도지수"] = (df["hvoc"] / (df["hvec"].fillna(0) + 1)).round(2)
 
     # 시/도 컬럼 (주소 첫 단어)
@@ -82,12 +105,11 @@ def fetch_data(num_rows: int = 999) -> pd.DataFrame:
         return "혼잡"
 
     df["혼잡도"] = df["혼잡도지수"].apply(label_cong)
-
     df.rename(columns={"hvidate": "업데이트"}, inplace=True)
 
     # 좌표 없는 병원 제거
     df = df.dropna(subset=["wgs84Lat", "wgs84Lon"]).reset_index(drop=True)
-    return df
+    return df, None
 
 
 # ---------------- UI 시작 ----------------
@@ -99,10 +121,15 @@ st.caption(
     "지금 더 빨리 진료받을 수 있는 병원을 찾도록 돕는 대시보드입니다."
 )
 
-df = fetch_data()
+df, err = fetch_data()
 
-if df.empty:
-    st.warning("표시할 데이터가 없습니다. 잠시 후 다시 시도해 주세요.")
+# API 에러가 있으면 바로 표시하고 종료
+if err:
+    st.error(err)
+    st.stop()
+
+if df is None or df.empty:
+    st.warning("표시할 수 있는 데이터가 없습니다.")
     st.stop()
 
 # ----- 사이드바: 필터 -----
@@ -134,7 +161,7 @@ try:
         my_latlon = (float(lat_input), float(lon_input))
         use_location = True
 except ValueError:
-    st.sidebar.warning("위도/경도를 다시 확인해 주세요. 예) 37.5665 / 126.9780")
+    st.sidebar.warning("위도/경도를 다시 확인해주세요. 예) 37.5665 / 126.9780")
 
 # ----- 필터 적용 -----
 df_f = df.copy()
@@ -254,3 +281,4 @@ st.dataframe(
     }),
     use_container_width=True
 )
+
