@@ -1,4 +1,3 @@
 import streamlit as st
 
-st.title("테스트 앱")
-
+API_KEY = st.secrets["EGEN_API_KEY"]
