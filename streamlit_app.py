@@ -122,6 +122,9 @@ st.caption(
 )
 
 df, err = fetch_data()
+st.subheader("🔍 API 응답 원본 확인용(임시)")
+st.json({"df_rows": 0 if df is None else len(df), "err": err})
+
 
 # API 에러가 있으면 바로 표시하고 종료
 if err:
